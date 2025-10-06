@@ -9,68 +9,56 @@ import calendar
 @st.cache_data(ttl=1800)  # Cache data for 30 minutes
 def get_stock_data(ticker_symbol):
     """
-    Fetches stock data from yfinance, calculates annualized volatility,
-    and returns key serializable information.
+    Fetches stock data, official expiration dates, and calculates volatility.
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
-        # A simple check to see if the ticker is valid
         if 'longName' not in info or info['longName'] is None:
-            return None, None, None
+            return None, None, None, None
 
-        # Get 1 year of historical data for volatility calculation
         hist = ticker.history(period="1y")
         if hist.empty:
-            return None, None, None
+            return None, None, None, None
             
         S0 = hist['Close'].iloc[-1]
         long_name = info['longName']
 
-        # Calculate Annualized Volatility
         log_returns = np.log(hist['Close'] / hist['Close'].shift(1))
-        # Use 252 trading days for annualization
         sigma = log_returns.std() * np.sqrt(252)
 
-        return S0, sigma, long_name
+        # Step 1: Try to get the official list of expiry dates
+        expirations = ticker.options
+        
+        return S0, sigma, long_name, expirations
     except Exception:
-        return None, None, None
+        # Return empty list for expirations if anything fails
+        return None, None, None, []
 
 def get_indian_risk_free_rate():
     """
     Returns a fixed rate as a proxy for the Indian risk-free rate.
     """
-    # Using a fixed rate as a reliable proxy for the Indian 10-Year Bond Yield.
-    # Live yfinance tickers for this are often unreliable.
     return 0.07
 
-def generate_monthly_thursday_expiries(num_months=12):
+def generate_all_thursday_expiries(num_weeks=16):
     """
-    Generates a list of the last Thursdays of the next few months,
-    which are the typical expiry dates for Indian stock options.
+    Generates a list of all upcoming Thursdays for the next few weeks.
+    This serves as a fallback if official dates can't be fetched.
     """
     expiries = []
     today = datetime.today()
-    current_year = today.year
-    current_month = today.month
-
-    for i in range(num_months):
-        month = current_month + i
-        year = current_year + (month - 1) // 12
-        month = (month - 1) % 12 + 1
-
-        # Find the last day of the month
-        last_day = calendar.monthrange(year, month)[1]
-        expiry_date = datetime(year, month, last_day)
-
-        # Work backwards to find the last Thursday (weekday() == 3)
-        while expiry_date.weekday() != 3:
-            expiry_date -= timedelta(days=1)
+    # Find the next Thursday (weekday() == 3)
+    days_ahead = (3 - today.weekday() + 7) % 7
+    if days_ahead == 0 and today.weekday() == 3: # If today is Thursday
+        next_thursday = today
+    else:
+        next_thursday = today + timedelta(days=days_ahead)
         
-        # Only add future expiry dates
-        if expiry_date.date() > today.date():
-            expiries.append(expiry_date.strftime('%Y-%m-%d'))
-            
+    for i in range(num_weeks):
+        expiry_date = next_thursday + timedelta(weeks=i)
+        expiries.append(expiry_date.strftime('%Y-%m-%d'))
+        
     return expiries
 
 
@@ -78,33 +66,28 @@ def generate_monthly_thursday_expiries(num_months=12):
 
 def calculate_option_price_custom(S0, K, T, r, sigma, option_type):
     """Calculates the option price based on the user's custom single-step binomial model."""
-    if T <= 0 or sigma <= 0: # Avoid invalid calculations
+    if T <= 0 or sigma <= 0:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
 
-    # 1. Up and Down factors
     u = 1 + sigma
     d = 1 / u
     
-    # Check for division by zero
     if u == d:
         return 0, 0, 0, 0, 0, 0, 0, 0, 0
     
     price_up = S0 * u
     price_down = S0 * d
 
-    # 2. Risk Neutral Probability
     prob_up = ((1 + r * T) - d) / (u - d)
     prob_down = 1 - prob_up
 
-    # 3. Option valuation at final nodes
     if option_type == 'Call':
         payoff_up = max(0, price_up - K)
         payoff_down = max(0, price_down - K)
-    else:  # Put Option
+    else:  # Put
         payoff_up = max(0, K - price_up)
         payoff_down = max(0, K - price_down)
 
-    # 4. Discounting
     total_value_final_node = (payoff_up * prob_up) + (payoff_down * prob_down)
     option_price = total_value_final_node / (1 + r * T)
     
@@ -114,34 +97,23 @@ def calculate_greeks(S0, K, T, r, sigma, option_type):
     """
     Calculates option Greeks using the finite difference method.
     """
-    # Small changes for derivatives
-    dS = S0 * 0.01   # 1% change in stock price
-    dSigma = 0.01    # 1% change in volatility
-    dT = 1 / 365.0   # 1 day change in time
-    dR = 0.01        # 1% change in risk-free rate
+    dS = S0 * 0.01
+    dSigma = 0.01
+    dT = 1 / 365.0
+    dR = 0.01
 
-    # Base price
     base_price, *_ = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
-
-    # Prices for Delta and Gamma calculation
     price_plus_S, *_ = calculate_option_price_custom(S0 + dS, K, T, r, sigma, option_type)
     price_minus_S, *_ = calculate_option_price_custom(S0 - dS, K, T, r, sigma, option_type)
-    
-    # Price for Vega calculation
     price_plus_sigma, *_ = calculate_option_price_custom(S0, K, T, r, sigma + dSigma, option_type)
-    
-    # Price for Theta calculation
     price_minus_T, *_ = calculate_option_price_custom(S0, K, T - dT, r, sigma, option_type)
-    
-    # Price for Rho calculation
     price_plus_r, *_ = calculate_option_price_custom(S0, K, T, r + dR, sigma, option_type)
 
-    # Greek Calculations
     delta = (price_plus_S - price_minus_S) / (2 * dS)
     gamma = (price_plus_S - 2 * base_price + price_minus_S) / (dS ** 2)
-    vega = (price_plus_sigma - base_price) / (dSigma * 100) # Per 1% change
-    theta = (price_minus_T - base_price) / dT # Per day
-    rho = (price_plus_r - base_price) / (dR * 100) # Per 1% change
+    vega = (price_plus_sigma - base_price) / (dSigma * 100)
+    theta = (price_minus_T - base_price) / dT
+    rho = (price_plus_r - base_price) / (dR * 100)
     
     return delta, gamma, vega, theta, rho
 
@@ -150,7 +122,6 @@ st.set_page_config(layout="wide")
 st.title("Indian Market Binomial Options Calculator")
 st.markdown("Enter an NSE stock ticker, and the app will fetch live data to price the option using your custom formulas.")
 
-# --- Stock Selection Input ---
 st.subheader("1. Select a Stock")
 ticker_input = st.text_input(
     "Enter Stock Ticker (e.g., RELIANCE, INFY, TCS)", 
@@ -158,14 +129,13 @@ ticker_input = st.text_input(
 ).upper()
 
 if ticker_input:
-    # Append .NS for the Indian market if no suffix is provided
     if not (ticker_input.endswith('.NS') or ticker_input.endswith('.BO')):
         ticker_symbol = ticker_input + '.NS'
         st.info(f"Appended '.NS' for the Indian market. Searching for: {ticker_symbol}")
     else:
         ticker_symbol = ticker_input
 
-    S0, sigma, long_name = get_stock_data(ticker_symbol)
+    S0, sigma, long_name, official_expirations = get_stock_data(ticker_symbol)
 
     if S0 is None:
         st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please check the symbol and try again.")
@@ -183,29 +153,34 @@ if ticker_input:
 
         st.subheader("2. Select Option Parameters")
         
-        # Generate potential expiry dates based on Indian market standards (last Thursday of month)
-        expirations = generate_monthly_thursday_expiries()
+        # Step 2: Use official dates if available, otherwise generate fallbacks
+        if official_expirations:
+            expirations = official_expirations
+            expiry_label = "Expiration Date (Official)"
+        else:
+            st.warning("Could not fetch the official list of expiry dates. Using generated weekly Thursdays as a fallback.")
+            expirations = generate_all_thursday_expiries()
+            expiry_label = "Expiration Date (Generated Thursdays)"
         
         if not expirations:
-            st.warning("Could not generate any future monthly expiry dates.")
+            st.error("No option expiration dates could be found or generated for this stock.")
         else:
             ticker_obj = yf.Ticker(ticker_symbol)
             sub_col1, sub_col2, sub_col3 = st.columns(3)
             with sub_col1:
                 option_type = st.selectbox("Option Type", ('Call', 'Put'))
             with sub_col2:
-                selected_expiry = st.selectbox("Expiration Date (Last Thursday of Month)", expirations)
+                selected_expiry = st.selectbox(expiry_label, expirations)
             
             expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
             T = (expiry_date - datetime.now()).days / 365.0
 
             try:
-                # Attempt to get option chain for the generated date
                 option_chain = ticker_obj.option_chain(selected_expiry)
                 strikes = option_chain.calls['strike'].tolist() if option_type == 'Call' else option_chain.puts['strike'].tolist()
                 
                 if not strikes:
-                     st.warning(f"No {option_type.lower()} option strikes found for the selected expiry date. This may mean no options are traded on this day.")
+                     st.warning(f"No {option_type.lower()} option strikes were found for {selected_expiry}. This may mean no options are traded on this day.")
                 else:
                     closest_strike = min(strikes, key=lambda x: abs(x - S0))
                     default_strike_index = strikes.index(closest_strike)
@@ -217,13 +192,11 @@ if ticker_input:
                     st.divider()
                     
                     st.header("3. Calculation Results")
-                    # --- Perform Main Calculation ---
                     (option_price, u, d, prob_up, prob_down, 
                      price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
 
                     st.metric(label=f"Calculated {option_type} Option Price", value=f"₹{option_price:,.4f}")
 
-                    # --- Perform Greeks Calculation ---
                     delta, gamma, vega, theta, rho = calculate_greeks(S0, K, T, r, sigma, option_type)
                     st.subheader("Option Greeks (Estimates)")
                     
@@ -236,7 +209,6 @@ if ticker_input:
 
                     st.divider()
 
-                    # --- Display Intermediate Values ---
                     st.subheader("Intermediate Values (Your Formulas)")
                     if not (0 <= prob_up <= 1):
                         st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
@@ -254,5 +226,5 @@ if ticker_input:
                         st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
 
             except Exception as e:
-                st.error(f"Could not fetch option chain data for {selected_expiry}. While this is a standard expiry date, yfinance may not have data for this specific contract. Please try another date if the issue persists.")
+                st.error(f"Could not fetch option chain data for {selected_expiry}. While this date was listed or generated, yfinance may not have data for this specific contract. Please try another date.")
 
