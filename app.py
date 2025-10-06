@@ -59,14 +59,20 @@ st.title("Binomial Options Calculator (with Yahoo Finance Data)")
 st.markdown("Select a stock, and the app will fetch live data to price the option using your custom formulas.")
 
 # --- Stock Selection Input ---
-ticker_symbol = st.text_input("Enter Stock Ticker (e.g., AAPL, NVDA, GOOG)", "AAPL").upper()
+# MODIFIED: Added specific instructions for international stocks
+st.subheader("1. Select a Stock")
+ticker_symbol = st.text_input(
+    "Enter Stock Ticker", 
+    "AAPL",
+    help="For non-US stocks, add the exchange suffix. Examples: RELIANCE.NS (India), VOW3.DE (Germany), BHP.AX (Australia)."
+).upper()
 
 if ticker_symbol:
     # --- Data Fetching and Display ---
     S0, sigma, expirations, long_name = get_stock_data(ticker_symbol)
 
     if S0 is None:
-        st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please try another.")
+        st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please check the symbol and add a market suffix if needed (e.g., .NS for India).")
     else:
         st.header(f"Selected: {long_name} ({ticker_symbol})")
         r = get_risk_free_rate()
@@ -80,10 +86,14 @@ if ticker_symbol:
         st.divider()
 
         # --- Option Parameter Selection ---
-        st.subheader("Select Option Parameters")
+        st.subheader("2. Select Option Parameters")
 
+        # MODIFIED: Added a more helpful message when no options are found.
         if not expirations:
-            st.warning("This stock has no available option expiration dates.")
+            st.warning(
+                f"This stock ({ticker_symbol}) has no available option expiration dates on Yahoo Finance. "
+                "This is common for certain stocks or if the ticker symbol is for a non-US market without the correct suffix (e.g., '.NS' for India)."
+            )
         else:
             # Create the Ticker object again (this is not cached and is lightweight)
             # to get the option chain data.
@@ -91,9 +101,9 @@ if ticker_symbol:
             
             sub_col1, sub_col2, sub_col3 = st.columns(3)
             with sub_col1:
-                option_type = st.selectbox("1. Option Type", ('Call', 'Put'))
+                option_type = st.selectbox("Option Type", ('Call', 'Put'))
             with sub_col2:
-                selected_expiry = st.selectbox("2. Expiration Date", expirations)
+                selected_expiry = st.selectbox("Expiration Date", expirations)
             
             # Calculate Time to Expiration in years
             expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
@@ -112,13 +122,13 @@ if ticker_symbol:
             default_strike_index = strikes.index(closest_strike)
 
             with sub_col3:
-                K = st.selectbox("3. Strike Price (K)", strikes, index=default_strike_index)
+                K = st.selectbox("Strike Price (K)", strikes, index=default_strike_index)
             
             st.info(f"Time to Expiration (T) = **{T:.3f} years** ({int(T * 365)} days)", icon="⏳")
 
             # --- CALCULATION LOGIC BASED ON YOUR INSTRUCTIONS ---
             st.divider()
-            st.header("Calculation Results")
+            st.header("3. Calculation Results")
 
             # 1. Calculation of Up and Down factor
             u = 1 + sigma
@@ -163,8 +173,8 @@ if ticker_symbol:
                 with res_col1:
                     st.write(f"**Up Factor (u):** `{u:.4f}`")
                     st.write(f"**Down Factor (d):** `{d:.4f}`")
-                    st.write(f"**Stock Price (Up):** `${price_up:.2f}`")
-                    st.write(f"**Stock Price (Down):** `${price_down:.2f}`")
+                    st.write(f"**Stock Price (Up):** `${S0 * u:.2f}`") # Using S0*u directly for display
+                    st.write(f"**Stock Price (Down):** `${S0 * d:.2f}`") # Using S0*d directly for display
 
                 with res_col2:
                     st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
@@ -174,3 +184,4 @@ if ticker_symbol:
 
             except ZeroDivisionError:
                 st.error("Calculation error: Up and Down factors are equal (u=d). Cannot calculate probability.")
+
