@@ -9,12 +9,13 @@ from datetime import datetime
 def get_stock_data(ticker_symbol):
     """
     Fetches stock data from yfinance, calculates annualized volatility,
-    and returns key information.
+    and returns key serializable information.
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
+        info = ticker.info
         # A simple check to see if the ticker is valid
-        if 'longName' not in ticker.info or ticker.info['longName'] is None:
+        if 'longName' not in info or info['longName'] is None:
             return None, None, None, None
 
         # Get 1 year of historical data for volatility calculation
@@ -23,6 +24,7 @@ def get_stock_data(ticker_symbol):
             return None, None, None, None
             
         S0 = hist['Close'].iloc[-1]
+        long_name = info['longName']
 
         # Calculate Annualized Volatility
         log_returns = np.log(hist['Close'] / hist['Close'].shift(1))
@@ -31,7 +33,8 @@ def get_stock_data(ticker_symbol):
 
         expirations = ticker.options
 
-        return S0, sigma, expirations, ticker
+        # Return only serializable data
+        return S0, sigma, expirations, long_name
     except Exception:
         return None, None, None, None
 
@@ -60,12 +63,12 @@ ticker_symbol = st.text_input("Enter Stock Ticker (e.g., AAPL, NVDA, GOOG)", "AA
 
 if ticker_symbol:
     # --- Data Fetching and Display ---
-    S0, sigma, expirations, ticker_obj = get_stock_data(ticker_symbol)
+    S0, sigma, expirations, long_name = get_stock_data(ticker_symbol)
 
     if S0 is None:
         st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please try another.")
     else:
-        st.header(f"Selected: {ticker_obj.info['longName']} ({ticker_symbol})")
+        st.header(f"Selected: {long_name} ({ticker_symbol})")
         r = get_risk_free_rate()
 
         # Display key fetched data points
@@ -82,6 +85,10 @@ if ticker_symbol:
         if not expirations:
             st.warning("This stock has no available option expiration dates.")
         else:
+            # Create the Ticker object again (this is not cached and is lightweight)
+            # to get the option chain data.
+            ticker_obj = yf.Ticker(ticker_symbol)
+            
             sub_col1, sub_col2, sub_col3 = st.columns(3)
             with sub_col1:
                 option_type = st.selectbox("1. Option Type", ('Call', 'Put'))
