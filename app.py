@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import numpy as np
 from datetime import datetime, timedelta
+import calendar
 
 # --- Helper Functions with Caching ---
 
@@ -31,7 +32,6 @@ def get_stock_data(ticker_symbol):
         # Use 252 trading days for annualization
         sigma = log_returns.std() * np.sqrt(252)
 
-        # We no longer need to return expirations from here
         return S0, sigma, long_name
     except Exception:
         return None, None, None
@@ -44,25 +44,35 @@ def get_indian_risk_free_rate():
     # Live yfinance tickers for this are often unreliable.
     return 0.07
 
-def generate_tuesday_expiries(num_weeks=12):
+def generate_monthly_thursday_expiries(num_months=12):
     """
-    Generates a list of upcoming Tuesdays as potential expiry dates.
-    This is a workaround for yfinance not providing Indian expiry dates.
+    Generates a list of the last Thursdays of the next few months,
+    which are the typical expiry dates for Indian stock options.
     """
     expiries = []
     today = datetime.today()
-    # Find the next Tuesday (weekday() == 1)
-    days_ahead = (1 - today.weekday() + 7) % 7
-    if days_ahead == 0 and today.weekday() == 1: # If today is Tuesday
-        next_tuesday = today
-    else:
-        next_tuesday = today + timedelta(days=days_ahead)
+    current_year = today.year
+    current_month = today.month
+
+    for i in range(num_months):
+        month = current_month + i
+        year = current_year + (month - 1) // 12
+        month = (month - 1) % 12 + 1
+
+        # Find the last day of the month
+        last_day = calendar.monthrange(year, month)[1]
+        expiry_date = datetime(year, month, last_day)
+
+        # Work backwards to find the last Thursday (weekday() == 3)
+        while expiry_date.weekday() != 3:
+            expiry_date -= timedelta(days=1)
         
-    for i in range(num_weeks):
-        expiry_date = next_tuesday + timedelta(weeks=i)
-        expiries.append(expiry_date.strftime('%Y-%m-%d'))
-        
+        # Only add future expiry dates
+        if expiry_date.date() > today.date():
+            expiries.append(expiry_date.strftime('%Y-%m-%d'))
+            
     return expiries
+
 
 # --- CORE CALCULATION FUNCTIONS ---
 
@@ -173,73 +183,76 @@ if ticker_input:
 
         st.subheader("2. Select Option Parameters")
         
-        # Generate potential expiry dates as a workaround for yfinance issue
-        expirations = generate_tuesday_expiries()
+        # Generate potential expiry dates based on Indian market standards (last Thursday of month)
+        expirations = generate_monthly_thursday_expiries()
         
-        ticker_obj = yf.Ticker(ticker_symbol)
-        sub_col1, sub_col2, sub_col3 = st.columns(3)
-        with sub_col1:
-            option_type = st.selectbox("Option Type", ('Call', 'Put'))
-        with sub_col2:
-            selected_expiry = st.selectbox("Expiration Date (Generated Tuesdays)", expirations)
-        
-        expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
-        T = (expiry_date - datetime.now()).days / 365.0
-
-        try:
-            # Attempt to get option chain for the generated date
-            option_chain = ticker_obj.option_chain(selected_expiry)
-            strikes = option_chain.calls['strike'].tolist() if option_type == 'Call' else option_chain.puts['strike'].tolist()
+        if not expirations:
+            st.warning("Could not generate any future monthly expiry dates.")
+        else:
+            ticker_obj = yf.Ticker(ticker_symbol)
+            sub_col1, sub_col2, sub_col3 = st.columns(3)
+            with sub_col1:
+                option_type = st.selectbox("Option Type", ('Call', 'Put'))
+            with sub_col2:
+                selected_expiry = st.selectbox("Expiration Date (Last Thursday of Month)", expirations)
             
-            if not strikes:
-                 st.warning(f"No {option_type.lower()} option strikes found for the selected expiry date. This may mean no options are traded on this day.")
-            else:
-                closest_strike = min(strikes, key=lambda x: abs(x - S0))
-                default_strike_index = strikes.index(closest_strike)
+            expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
+            T = (expiry_date - datetime.now()).days / 365.0
 
-                with sub_col3:
-                    K = st.selectbox("Strike Price (K)", strikes, index=default_strike_index)
+            try:
+                # Attempt to get option chain for the generated date
+                option_chain = ticker_obj.option_chain(selected_expiry)
+                strikes = option_chain.calls['strike'].tolist() if option_type == 'Call' else option_chain.puts['strike'].tolist()
                 
-                st.info(f"Time to Expiration (T) = **{T:.3f} years** ({int(T * 365)} days)", icon="⏳")
-                st.divider()
-                
-                st.header("3. Calculation Results")
-                # --- Perform Main Calculation ---
-                (option_price, u, d, prob_up, prob_down, 
-                 price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
+                if not strikes:
+                     st.warning(f"No {option_type.lower()} option strikes found for the selected expiry date. This may mean no options are traded on this day.")
+                else:
+                    closest_strike = min(strikes, key=lambda x: abs(x - S0))
+                    default_strike_index = strikes.index(closest_strike)
 
-                st.metric(label=f"Calculated {option_type} Option Price", value=f"₹{option_price:,.4f}")
+                    with sub_col3:
+                        K = st.selectbox("Strike Price (K)", strikes, index=default_strike_index)
+                    
+                    st.info(f"Time to Expiration (T) = **{T:.3f} years** ({int(T * 365)} days)", icon="⏳")
+                    st.divider()
+                    
+                    st.header("3. Calculation Results")
+                    # --- Perform Main Calculation ---
+                    (option_price, u, d, prob_up, prob_down, 
+                     price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
 
-                # --- Perform Greeks Calculation ---
-                delta, gamma, vega, theta, rho = calculate_greeks(S0, K, T, r, sigma, option_type)
-                st.subheader("Option Greeks (Estimates)")
-                
-                greek_col1, greek_col2, greek_col3, greek_col4, greek_col5 = st.columns(5)
-                greek_col1.metric("Delta", f"{delta:.4f}")
-                greek_col2.metric("Gamma", f"{gamma:.4f}")
-                greek_col3.metric("Vega", f"{vega:.4f}")
-                greek_col4.metric("Theta", f"{theta:.4f}")
-                greek_col5.metric("Rho", f"{rho:.4f}")
+                    st.metric(label=f"Calculated {option_type} Option Price", value=f"₹{option_price:,.4f}")
 
-                st.divider()
+                    # --- Perform Greeks Calculation ---
+                    delta, gamma, vega, theta, rho = calculate_greeks(S0, K, T, r, sigma, option_type)
+                    st.subheader("Option Greeks (Estimates)")
+                    
+                    greek_col1, greek_col2, greek_col3, greek_col4, greek_col5 = st.columns(5)
+                    greek_col1.metric("Delta", f"{delta:.4f}")
+                    greek_col2.metric("Gamma", f"{gamma:.4f}")
+                    greek_col3.metric("Vega", f"{vega:.4f}")
+                    greek_col4.metric("Theta", f"{theta:.4f}")
+                    greek_col5.metric("Rho", f"{rho:.4f}")
 
-                # --- Display Intermediate Values ---
-                st.subheader("Intermediate Values (Your Formulas)")
-                if not (0 <= prob_up <= 1):
-                    st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
-                
-                res_col1, res_col2 = st.columns(2)
-                with res_col1:
-                    st.write(f"**Up Factor (u):** `{u:.4f}`")
-                    st.write(f"**Down Factor (d):** `{d:.4f}`")
-                    st.write(f"**Stock Price (Up):** `₹{price_up:,.2f}`")
-                    st.write(f"**Stock Price (Down):** `₹{price_down:,.2f}`")
-                with res_col2:
-                    st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
-                    st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
-                    st.write(f"**Payoff (Up):** `₹{payoff_up:,.2f}`")
-                    st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
+                    st.divider()
 
-        except Exception as e:
-            st.error(f"Could not fetch option chain data for {selected_expiry}. This likely means no options are traded for this stock on this specific date. Please try another date.")
+                    # --- Display Intermediate Values ---
+                    st.subheader("Intermediate Values (Your Formulas)")
+                    if not (0 <= prob_up <= 1):
+                        st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
+                    
+                    res_col1, res_col2 = st.columns(2)
+                    with res_col1:
+                        st.write(f"**Up Factor (u):** `{u:.4f}`")
+                        st.write(f"**Down Factor (d):** `{d:.4f}`")
+                        st.write(f"**Stock Price (Up):** `₹{price_up:,.2f}`")
+                        st.write(f"**Stock Price (Down):** `₹{price_down:,.2f}`")
+                    with res_col2:
+                        st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
+                        st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
+                        st.write(f"**Payoff (Up):** `₹{payoff_up:,.2f}`")
+                        st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
+
+            except Exception as e:
+                st.error(f"Could not fetch option chain data for {selected_expiry}. While this is a standard expiry date, yfinance may not have data for this specific contract. Please try another date if the issue persists.")
 
