@@ -1,7 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- Helper Functions with Caching ---
 
@@ -16,12 +16,12 @@ def get_stock_data(ticker_symbol):
         info = ticker.info
         # A simple check to see if the ticker is valid
         if 'longName' not in info or info['longName'] is None:
-            return None, None, None, None
+            return None, None, None
 
         # Get 1 year of historical data for volatility calculation
         hist = ticker.history(period="1y")
         if hist.empty:
-            return None, None, None, None
+            return None, None, None
             
         S0 = hist['Close'].iloc[-1]
         long_name = info['longName']
@@ -31,12 +31,10 @@ def get_stock_data(ticker_symbol):
         # Use 252 trading days for annualization
         sigma = log_returns.std() * np.sqrt(252)
 
-        expirations = ticker.options
-
-        # Return only serializable data
-        return S0, sigma, expirations, long_name
+        # We no longer need to return expirations from here
+        return S0, sigma, long_name
     except Exception:
-        return None, None, None, None
+        return None, None, None
 
 def get_indian_risk_free_rate():
     """
@@ -45,6 +43,26 @@ def get_indian_risk_free_rate():
     # Using a fixed rate as a reliable proxy for the Indian 10-Year Bond Yield.
     # Live yfinance tickers for this are often unreliable.
     return 0.07
+
+def generate_tuesday_expiries(num_weeks=12):
+    """
+    Generates a list of upcoming Tuesdays as potential expiry dates.
+    This is a workaround for yfinance not providing Indian expiry dates.
+    """
+    expiries = []
+    today = datetime.today()
+    # Find the next Tuesday (weekday() == 1)
+    days_ahead = (1 - today.weekday() + 7) % 7
+    if days_ahead == 0 and today.weekday() == 1: # If today is Tuesday
+        next_tuesday = today
+    else:
+        next_tuesday = today + timedelta(days=days_ahead)
+        
+    for i in range(num_weeks):
+        expiry_date = next_tuesday + timedelta(weeks=i)
+        expiries.append(expiry_date.strftime('%Y-%m-%d'))
+        
+    return expiries
 
 # --- CORE CALCULATION FUNCTIONS ---
 
@@ -137,7 +155,7 @@ if ticker_input:
     else:
         ticker_symbol = ticker_input
 
-    S0, sigma, expirations, long_name = get_stock_data(ticker_symbol)
+    S0, sigma, long_name = get_stock_data(ticker_symbol)
 
     if S0 is None:
         st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please check the symbol and try again.")
@@ -154,24 +172,27 @@ if ticker_input:
         st.divider()
 
         st.subheader("2. Select Option Parameters")
-        if not expirations:
-            st.warning(f"This stock ({ticker_symbol}) has no available option expiration dates on Yahoo Finance.")
-        else:
-            ticker_obj = yf.Ticker(ticker_symbol)
-            sub_col1, sub_col2, sub_col3 = st.columns(3)
-            with sub_col1:
-                option_type = st.selectbox("Option Type", ('Call', 'Put'))
-            with sub_col2:
-                selected_expiry = st.selectbox("Expiration Date", expirations)
-            
-            expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
-            T = (expiry_date - datetime.now()).days / 365.0
+        
+        # Generate potential expiry dates as a workaround for yfinance issue
+        expirations = generate_tuesday_expiries()
+        
+        ticker_obj = yf.Ticker(ticker_symbol)
+        sub_col1, sub_col2, sub_col3 = st.columns(3)
+        with sub_col1:
+            option_type = st.selectbox("Option Type", ('Call', 'Put'))
+        with sub_col2:
+            selected_expiry = st.selectbox("Expiration Date (Generated Tuesdays)", expirations)
+        
+        expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
+        T = (expiry_date - datetime.now()).days / 365.0
 
+        try:
+            # Attempt to get option chain for the generated date
             option_chain = ticker_obj.option_chain(selected_expiry)
             strikes = option_chain.calls['strike'].tolist() if option_type == 'Call' else option_chain.puts['strike'].tolist()
             
             if not strikes:
-                 st.warning(f"No {option_type.lower()} option strikes found for the selected expiry date.")
+                 st.warning(f"No {option_type.lower()} option strikes found for the selected expiry date. This may mean no options are traded on this day.")
             else:
                 closest_strike = min(strikes, key=lambda x: abs(x - S0))
                 default_strike_index = strikes.index(closest_strike)
@@ -218,4 +239,7 @@ if ticker_input:
                     st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
                     st.write(f"**Payoff (Up):** `₹{payoff_up:,.2f}`")
                     st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
+
+        except Exception as e:
+            st.error(f"Could not fetch option chain data for {selected_expiry}. This likely means no options are traded for this stock on this specific date. Please try another date.")
 
