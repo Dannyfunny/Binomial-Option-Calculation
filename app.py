@@ -38,27 +38,20 @@ def get_stock_data(ticker_symbol):
     except Exception:
         return None, None, None, None
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_risk_free_rate():
+def get_indian_risk_free_rate():
     """
-    Fetches the 13-week US Treasury Bill yield (^IRX) as a proxy
-    for the risk-free rate.
+    Returns a fixed rate as a proxy for the Indian risk-free rate.
     """
-    try:
-        t_bill = yf.Ticker("^IRX")
-        rate = t_bill.history(period="1d")['Close'].iloc[-1]
-        return rate / 100
-    except Exception:
-        # Provide a fallback rate if the API fails
-        st.warning("Could not fetch live risk-free rate. Defaulting to 5%.")
-        return 0.05
+    # Using a fixed rate as a reliable proxy for the Indian 10-Year Bond Yield.
+    # Live yfinance tickers for this are often unreliable.
+    return 0.07
 
 # --- CORE CALCULATION FUNCTIONS ---
 
 def calculate_option_price_custom(S0, K, T, r, sigma, option_type):
     """Calculates the option price based on the user's custom single-step binomial model."""
     if T <= 0 or sigma <= 0: # Avoid invalid calculations
-        return 0, 0, 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0, 0, 0, 0
 
     # 1. Up and Down factors
     u = 1 + sigma
@@ -66,7 +59,7 @@ def calculate_option_price_custom(S0, K, T, r, sigma, option_type):
     
     # Check for division by zero
     if u == d:
-        return 0, 0, 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0, 0, 0, 0
     
     price_up = S0 * u
     price_down = S0 * d
@@ -126,35 +119,43 @@ def calculate_greeks(S0, K, T, r, sigma, option_type):
 
 # --- STREAMLIT USER INTERFACE ---
 st.set_page_config(layout="wide")
-st.title("Binomial Options Calculator (with Yahoo Finance Data)")
-st.markdown("Select a stock, and the app will fetch live data to price the option using your custom formulas.")
+st.title("Indian Market Binomial Options Calculator")
+st.markdown("Enter an NSE stock ticker, and the app will fetch live data to price the option using your custom formulas.")
 
 # --- Stock Selection Input ---
 st.subheader("1. Select a Stock")
-ticker_symbol = st.text_input(
-    "Enter Stock Ticker", 
-    "AAPL",
-    help="For non-US stocks, add the exchange suffix. Examples: RELIANCE.NS (India), VOW3.DE (Germany), BHP.AX (Australia)."
+ticker_input = st.text_input(
+    "Enter Stock Ticker (e.g., RELIANCE, INFY, TCS)", 
+    "RELIANCE"
 ).upper()
 
-if ticker_symbol:
+if ticker_input:
+    # Append .NS for the Indian market if no suffix is provided
+    if not (ticker_input.endswith('.NS') or ticker_input.endswith('.BO')):
+        ticker_symbol = ticker_input + '.NS'
+        st.info(f"Appended '.NS' for the Indian market. Searching for: {ticker_symbol}")
+    else:
+        ticker_symbol = ticker_input
+
     S0, sigma, expirations, long_name = get_stock_data(ticker_symbol)
 
     if S0 is None:
-        st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please check the symbol and add a market suffix if needed (e.g., .NS for India).")
+        st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please check the symbol and try again.")
     else:
         st.header(f"Selected: {long_name} ({ticker_symbol})")
-        r = get_risk_free_rate()
+        r = get_indian_risk_free_rate()
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("Current Stock Price (S₀)", f"${S0:.2f}")
+        col1.metric("Current Stock Price (S₀)", f"₹{S0:,.2f}")
         col2.metric("Annualized Volatility (σ)", f"{sigma:.2%}")
         col3.metric("Risk-Free Rate (r)", f"{r:.2%}")
+        st.caption("Note: Risk-free rate is a fixed 7.0% proxy for the Indian 10-year government bond yield.")
+
         st.divider()
 
         st.subheader("2. Select Option Parameters")
         if not expirations:
-            st.warning(f"This stock ({ticker_symbol}) has no available option expiration dates on Yahoo Finance. This is common for certain stocks or if the ticker symbol is for a non-US market without the correct suffix (e.g., '.NS' for India).")
+            st.warning(f"This stock ({ticker_symbol}) has no available option expiration dates on Yahoo Finance.")
         else:
             ticker_obj = yf.Ticker(ticker_symbol)
             sub_col1, sub_col2, sub_col3 = st.columns(3)
@@ -169,48 +170,52 @@ if ticker_symbol:
             option_chain = ticker_obj.option_chain(selected_expiry)
             strikes = option_chain.calls['strike'].tolist() if option_type == 'Call' else option_chain.puts['strike'].tolist()
             
-            closest_strike = min(strikes, key=lambda x: abs(x - S0))
-            default_strike_index = strikes.index(closest_strike)
+            if not strikes:
+                 st.warning(f"No {option_type.lower()} option strikes found for the selected expiry date.")
+            else:
+                closest_strike = min(strikes, key=lambda x: abs(x - S0))
+                default_strike_index = strikes.index(closest_strike)
 
-            with sub_col3:
-                K = st.selectbox("Strike Price (K)", strikes, index=default_strike_index)
-            
-            st.info(f"Time to Expiration (T) = **{T:.3f} years** ({int(T * 365)} days)", icon="⏳")
-            st.divider()
-            
-            st.header("3. Calculation Results")
-            # --- Perform Main Calculation ---
-            (option_price, u, d, prob_up, prob_down, 
-             price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
+                with sub_col3:
+                    K = st.selectbox("Strike Price (K)", strikes, index=default_strike_index)
+                
+                st.info(f"Time to Expiration (T) = **{T:.3f} years** ({int(T * 365)} days)", icon="⏳")
+                st.divider()
+                
+                st.header("3. Calculation Results")
+                # --- Perform Main Calculation ---
+                (option_price, u, d, prob_up, prob_down, 
+                 price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
 
-            st.metric(label=f"Calculated {option_type} Option Price", value=f"${option_price:.4f}")
+                st.metric(label=f"Calculated {option_type} Option Price", value=f"₹{option_price:,.4f}")
 
-            # --- Perform Greeks Calculation ---
-            delta, gamma, vega, theta, rho = calculate_greeks(S0, K, T, r, sigma, option_type)
-            st.subheader("Option Greeks (Estimates)")
-            
-            greek_col1, greek_col2, greek_col3, greek_col4, greek_col5 = st.columns(5)
-            greek_col1.metric("Delta", f"{delta:.4f}")
-            greek_col2.metric("Gamma", f"{gamma:.4f}")
-            greek_col3.metric("Vega", f"{vega:.4f}")
-            greek_col4.metric("Theta", f"{theta:.4f}")
-            greek_col5.metric("Rho", f"{rho:.4f}")
+                # --- Perform Greeks Calculation ---
+                delta, gamma, vega, theta, rho = calculate_greeks(S0, K, T, r, sigma, option_type)
+                st.subheader("Option Greeks (Estimates)")
+                
+                greek_col1, greek_col2, greek_col3, greek_col4, greek_col5 = st.columns(5)
+                greek_col1.metric("Delta", f"{delta:.4f}")
+                greek_col2.metric("Gamma", f"{gamma:.4f}")
+                greek_col3.metric("Vega", f"{vega:.4f}")
+                greek_col4.metric("Theta", f"{theta:.4f}")
+                greek_col5.metric("Rho", f"{rho:.4f}")
 
-            st.divider()
+                st.divider()
 
-            # --- Display Intermediate Values ---
-            st.subheader("Intermediate Values (Your Formulas)")
-            if not (0 <= prob_up <= 1):
-                st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
-            
-            res_col1, res_col2 = st.columns(2)
-            with res_col1:
-                st.write(f"**Up Factor (u):** `{u:.4f}`")
-                st.write(f"**Down Factor (d):** `{d:.4f}`")
-                st.write(f"**Stock Price (Up):** `${price_up:.2f}`")
-                st.write(f"**Stock Price (Down):** `${price_down:.2f}`")
-            with res_col2:
-                st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
-                st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
-                st.write(f"**Payoff (Up):** `${payoff_up:.2f}`")
-                st.write(f"**Payoff (Down):** `${payoff_down:.2f}`")
+                # --- Display Intermediate Values ---
+                st.subheader("Intermediate Values (Your Formulas)")
+                if not (0 <= prob_up <= 1):
+                    st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
+                
+                res_col1, res_col2 = st.columns(2)
+                with res_col1:
+                    st.write(f"**Up Factor (u):** `{u:.4f}`")
+                    st.write(f"**Down Factor (d):** `{d:.4f}`")
+                    st.write(f"**Stock Price (Up):** `₹{price_up:,.2f}`")
+                    st.write(f"**Stock Price (Down):** `₹{price_down:,.2f}`")
+                with res_col2:
+                    st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
+                    st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
+                    st.write(f"**Payoff (Up):** `₹{payoff_up:,.2f}`")
+                    st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
+
