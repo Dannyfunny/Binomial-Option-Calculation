@@ -9,58 +9,35 @@ import calendar
 @st.cache_data(ttl=1800)  # Cache data for 30 minutes
 def get_stock_data(ticker_symbol):
     """
-    Fetches stock data, official expiration dates, and calculates volatility.
+    Fetches stock data and calculates volatility.
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
         if 'longName' not in info or info['longName'] is None:
-            return None, None, None, None
+            # Return None for all values if the ticker is invalid
+            return None, None, None
 
         hist = ticker.history(period="1y")
         if hist.empty:
-            return None, None, None, None
+            return None, None, None
             
         S0 = hist['Close'].iloc[-1]
         long_name = info['longName']
 
         log_returns = np.log(hist['Close'] / hist['Close'].shift(1))
         sigma = log_returns.std() * np.sqrt(252)
-
-        # Step 1: Try to get the official list of expiry dates
-        expirations = ticker.options
         
-        return S0, sigma, long_name, expirations
+        return S0, sigma, long_name
     except Exception:
-        # Return empty list for expirations if anything fails
-        return None, None, None, []
+        # Return None for all values if anything fails
+        return None, None, None
 
 def get_indian_risk_free_rate():
     """
     Returns a fixed rate as a proxy for the Indian risk-free rate.
     """
     return 0.07
-
-def generate_all_thursday_expiries(num_weeks=16):
-    """
-    Generates a list of all upcoming Thursdays for the next few weeks.
-    This serves as a fallback if official dates can't be fetched.
-    """
-    expiries = []
-    today = datetime.today()
-    # Find the next Thursday (weekday() == 3)
-    days_ahead = (3 - today.weekday() + 7) % 7
-    if days_ahead == 0 and today.weekday() == 3: # If today is Thursday
-        next_thursday = today
-    else:
-        next_thursday = today + timedelta(days=days_ahead)
-        
-    for i in range(num_weeks):
-        expiry_date = next_thursday + timedelta(weeks=i)
-        expiries.append(expiry_date.strftime('%Y-%m-%d'))
-        
-    return expiries
-
 
 # --- CORE CALCULATION FUNCTIONS ---
 
@@ -95,7 +72,7 @@ def calculate_option_price_custom(S0, K, T, r, sigma, option_type):
 
 def calculate_greeks(S0, K, T, r, sigma, option_type):
     """
-    Calculates option Greeks using the finite difference method.
+    Calculates option Greeks using the finite difference method and returns intermediate values.
     """
     dS = S0 * 0.01
     dSigma = 0.01
@@ -115,7 +92,18 @@ def calculate_greeks(S0, K, T, r, sigma, option_type):
     theta = (price_minus_T - base_price) / dT
     rho = (price_plus_r - base_price) / (dR * 100)
     
-    return delta, gamma, vega, theta, rho
+    # Bundle intermediate values for returning
+    calculation_details = {
+        "dS": dS,
+        "base_price": base_price,
+        "price_plus_S": price_plus_S,
+        "price_minus_S": price_minus_S,
+        "price_plus_sigma": price_plus_sigma,
+        "price_minus_T": price_minus_T,
+        "price_plus_r": price_plus_r
+    }
+    
+    return delta, gamma, vega, theta, rho, calculation_details
 
 # --- STREAMLIT USER INTERFACE ---
 st.set_page_config(layout="wide")
@@ -135,7 +123,7 @@ if ticker_input:
     else:
         ticker_symbol = ticker_input
 
-    S0, sigma, long_name, official_expirations = get_stock_data(ticker_symbol)
+    S0, sigma, long_name = get_stock_data(ticker_symbol)
 
     if S0 is None:
         st.error(f"Invalid or unsupported ticker symbol: {ticker_symbol}. Please check the symbol and try again.")
@@ -153,78 +141,109 @@ if ticker_input:
 
         st.subheader("2. Select Option Parameters")
         
-        # Step 2: Use official dates if available, otherwise generate fallbacks
-        if official_expirations:
-            expirations = official_expirations
-            expiry_label = "Expiration Date (Official)"
-        else:
-            st.warning("Could not fetch the official list of expiry dates. Using generated weekly Thursdays as a fallback.")
-            expirations = generate_all_thursday_expiries()
-            expiry_label = "Expiration Date (Generated Thursdays)"
+        sub_col1, sub_col2, sub_col3 = st.columns(3)
+        with sub_col1:
+            option_type = st.selectbox("Option Type", ('Call', 'Put'))
+
+        with sub_col2:
+            days_to_expiry = st.number_input(
+                "Days to Expiration", 
+                min_value=1, 
+                max_value=730,
+                value=30, 
+                step=1,
+                help="Enter the number of days until the option expires."
+            )
+
+        T = days_to_expiry / 365.0
+
+        with sub_col3:
+            default_strike = round(S0 / 5) * 5
+            K = st.number_input(
+                "Strike Price (K)", 
+                min_value=0.0,
+                value=float(default_strike), 
+                step=1.0, 
+                format="%.2f"
+            )
         
-        if not expirations:
-            st.error("No option expiration dates could be found or generated for this stock.")
-        else:
-            ticker_obj = yf.Ticker(ticker_symbol)
-            sub_col1, sub_col2, sub_col3 = st.columns(3)
-            with sub_col1:
-                option_type = st.selectbox("Option Type", ('Call', 'Put'))
-            with sub_col2:
-                selected_expiry = st.selectbox(expiry_label, expirations)
+        st.info(f"Time to Expiration (T) = **{T:.3f} years** ({days_to_expiry} days)", icon="⏳")
+        st.divider()
+        
+        st.header("3. Calculation Results")
+        (option_price, u, d, prob_up, prob_down, 
+         price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
+
+        st.metric(label=f"Calculated {option_type} Option Price", value=f"₹{option_price:,.4f}")
+
+        delta, gamma, vega, theta, rho, calculation_details = calculate_greeks(S0, K, T, r, sigma, option_type)
+        st.subheader("Option Greeks (Calculated)")
+        
+        greek_col1, greek_col2, greek_col3, greek_col4, greek_col5 = st.columns(5)
+        greek_col1.metric("Delta", f"{delta:.4f}")
+        greek_col2.metric("Gamma", f"{gamma:.4f}")
+        greek_col3.metric("Vega", f"{vega:.4f}")
+        greek_col4.metric("Theta", f"{theta:.4f}")
+        greek_col5.metric("Rho", f"{rho:.4f}")
+
+        # --- NEW: Expander for showing Greek calculation details ---
+        with st.expander("Show Greek Calculation Details"):
+            details = calculation_details
+            st.write("The Greeks are calculated using the finite difference method, which involves re-pricing the option with small changes to its inputs.")
             
-            expiry_date = datetime.strptime(selected_expiry, '%Y-%m-%d')
-            T = (expiry_date - datetime.now()).days / 365.0
+            st.markdown("---")
+            st.subheader("Delta (Δ)")
+            st.latex(r"\Delta = \frac{C(S_0 + dS) - C(S_0 - dS)}{2 \cdot dS}")
+            st.write(f"Price with increased Stock (S + dS): `₹{details['price_plus_S']:.4f}`")
+            st.write(f"Price with decreased Stock (S - dS): `₹{details['price_minus_S']:.4f}`")
+            st.write(f"Change in Stock (dS): `₹{details['dS']:.4f}`")
+            st.write(f"**Calculation:** `({details['price_plus_S']:.4f} - {details['price_minus_S']:.4f}) / (2 * {details['dS']:.4f}) = {delta:.4f}`")
 
-            try:
-                option_chain = ticker_obj.option_chain(selected_expiry)
-                strikes = option_chain.calls['strike'].tolist() if option_type == 'Call' else option_chain.puts['strike'].tolist()
-                
-                if not strikes:
-                     st.warning(f"No {option_type.lower()} option strikes were found for {selected_expiry}. This may mean no options are traded on this day.")
-                else:
-                    closest_strike = min(strikes, key=lambda x: abs(x - S0))
-                    default_strike_index = strikes.index(closest_strike)
+            st.markdown("---")
+            st.subheader("Gamma (Γ)")
+            st.latex(r"\Gamma = \frac{C(S_0 + dS) - 2C(S_0) + C(S_0 - dS)}{(dS)^2}")
+            st.write(f"Base Price: `₹{details['base_price']:.4f}`")
+            st.write(f"Price with increased Stock (S + dS): `₹{details['price_plus_S']:.4f}`")
+            st.write(f"Price with decreased Stock (S - dS): `₹{details['price_minus_S']:.4f}`")
+            st.write(f"Change in Stock (dS): `₹{details['dS']:.4f}`")
+            st.write(f"**Calculation:** `({details['price_plus_S']:.4f} - 2 * {details['base_price']:.4f} + {details['price_minus_S']:.4f}) / ({details['dS']:.4f}²) = {gamma:.4f}`")
 
-                    with sub_col3:
-                        K = st.selectbox("Strike Price (K)", strikes, index=default_strike_index)
-                    
-                    st.info(f"Time to Expiration (T) = **{T:.3f} years** ({int(T * 365)} days)", icon="⏳")
-                    st.divider()
-                    
-                    st.header("3. Calculation Results")
-                    (option_price, u, d, prob_up, prob_down, 
-                     price_up, price_down, payoff_up, payoff_down) = calculate_option_price_custom(S0, K, T, r, sigma, option_type)
+            st.markdown("---")
+            st.subheader("Vega")
+            st.latex(r"Vega = \frac{C(\sigma + d\sigma) - C(\sigma)}{100 \cdot d\sigma}")
+            st.write(f"Base Price: `₹{details['base_price']:.4f}`")
+            st.write(f"Price with increased Volatility (σ + dσ): `₹{details['price_plus_sigma']:.4f}`")
+            st.write(f"**Calculation:** `({details['price_plus_sigma']:.4f} - {details['base_price']:.4f}) / (100 * 0.01) = {vega:.4f}`")
+            
+            st.markdown("---")
+            st.subheader("Theta (Θ)")
+            st.latex(r"\Theta = \frac{C(T - dT) - C(T)}{dT}")
+            st.write(f"Base Price: `₹{details['base_price']:.4f}`")
+            st.write(f"Price with decreased Time (T - dT): `₹{details['price_minus_T']:.4f}`")
+            st.write(f"Change in Time (dT): `1/365`")
+            st.write(f"**Calculation:** `({details['price_minus_T']:.4f} - {details['base_price']:.4f}) / (1/365) = {theta:.4f}`")
 
-                    st.metric(label=f"Calculated {option_type} Option Price", value=f"₹{option_price:,.4f}")
+            st.markdown("---")
+            st.subheader("Rho (ρ)")
+            st.latex(r"Rho = \frac{C(r + dr) - C(r)}{100 \cdot dr}")
+            st.write(f"Base Price: `₹{details['base_price']:.4f}`")
+            st.write(f"Price with increased Rate (r + dr): `₹{details['price_plus_r']:.4f}`")
+            st.write(f"**Calculation:** `({details['price_plus_r']:.4f} - {details['base_price']:.4f}) / (100 * 0.01) = {rho:.4f}`")
 
-                    delta, gamma, vega, theta, rho = calculate_greeks(S0, K, T, r, sigma, option_type)
-                    st.subheader("Option Greeks (Estimates)")
-                    
-                    greek_col1, greek_col2, greek_col3, greek_col4, greek_col5 = st.columns(5)
-                    greek_col1.metric("Delta", f"{delta:.4f}")
-                    greek_col2.metric("Gamma", f"{gamma:.4f}")
-                    greek_col3.metric("Vega", f"{vega:.4f}")
-                    greek_col4.metric("Theta", f"{theta:.4f}")
-                    greek_col5.metric("Rho", f"{rho:.4f}")
+        st.divider()
 
-                    st.divider()
-
-                    st.subheader("Intermediate Values (Your Formulas)")
-                    if not (0 <= prob_up <= 1):
-                        st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
-                    
-                    res_col1, res_col2 = st.columns(2)
-                    with res_col1:
-                        st.write(f"**Up Factor (u):** `{u:.4f}`")
-                        st.write(f"**Down Factor (d):** `{d:.4f}`")
-                        st.write(f"**Stock Price (Up):** `₹{price_up:,.2f}`")
-                        st.write(f"**Stock Price (Down):** `₹{price_down:,.2f}`")
-                    with res_col2:
-                        st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
-                        st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
-                        st.write(f"**Payoff (Up):** `₹{payoff_up:,.2f}`")
-                        st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
-
-            except Exception as e:
-                st.error(f"Could not fetch option chain data for {selected_expiry}. While this date was listed or generated, yfinance may not have data for this specific contract. Please try another date.")
-
+        st.subheader("Intermediate Values (Your Formulas)")
+        if not (0 <= prob_up <= 1):
+            st.warning(f"Arbitrage Opportunity Detected! The calculated probability ({prob_up:.2f}) is outside the valid [0, 1] range. Results may be unreliable.")
+        
+        res_col1, res_col2 = st.columns(2)
+        with res_col1:
+            st.write(f"**Up Factor (u):** `{u:.4f}`")
+            st.write(f"**Down Factor (d):** `{d:.4f}`")
+            st.write(f"**Stock Price (Up):** `₹{price_up:,.2f}`")
+            st.write(f"**Stock Price (Down):** `₹{price_down:,.2f}`")
+        with res_col2:
+            st.write(f"**Probability of Up Move (p):** `{prob_up:.4f}`")
+            st.write(f"**Probability of Down Move (1-p):** `{prob_down:.4f}`")
+            st.write(f"**Payoff (Up):** `₹{payoff_up:,.2f}`")
+            st.write(f"**Payoff (Down):** `₹{payoff_down:,.2f}`")
